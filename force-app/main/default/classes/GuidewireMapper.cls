@@ -1,3 +1,15 @@
+/*
+-------------------------------------------------------------------------------
+ Class Name     : GuidewireMapper
+ Author         : Saswata Banerjee
+ Created Date   : 2025-09-23
+ Last Modified  : 2025-09-23 
+ Description    : Not usd currently
+ Usage          : 
+ Dependencies   : 
+ Notes          : 
+-------------------------------------------------------------------------------
+*/
 public with sharing class GuidewireMapper {
 
     

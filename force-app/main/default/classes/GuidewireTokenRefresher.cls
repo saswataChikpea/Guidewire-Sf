@@ -23,4 +23,3 @@ global with sharing class GuidewireTokenRefresher implements Schedulable {
         System.enqueueJob(new GuidewireTokenQueueable());
     }
 }
-
