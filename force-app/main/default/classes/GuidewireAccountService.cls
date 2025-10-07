@@ -13,6 +13,217 @@
      */
 public with sharing class GuidewireAccountService {
     
+    
+    @AuraEnabled
+    public static String syncAccountAndContacts(String accountId, String gwJson) {
+        
+        
+        try {
+            Account a = [SELECT Id,Name, Guidewire_ID__c FROM Account WHERE Guidewire_ID__c = 'pc:10001' limit 1];
+            System.debug('Account found with Guidewire_ID__c: ' + accountId + ', Salesforce Id: ' + a.Id);
+            accountId = a.id;
+        } catch (Exception e) {
+            System.debug('No Account found with Guidewire_ID__c: ' + accountId);
+        }
+        
+        
+        
+        System.debug('=== syncAccountAndContacts START for AccountId: ' + accountId + ' ===');
+        try {
+            // 1. Upsert the Account as usual
+            System.debug('Calling upsertAccountsFromJson...');
+            upsertAccountsFromJson(gwJson);
+            System.debug('Account upsert complete, now processing contacts for AccountId: ' + accountId);
+            
+            // 2. Handle AccountContact section
+            Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(gwJson);
+            if (!parsed.containsKey('included')) {
+                System.debug('No included section found in JSON');
+                return 'No included section';
+            }
+            Map<String, Object> included = (Map<String, Object>) parsed.get('included');
+            if (!included.containsKey('AccountContact')) {
+                System.debug('No AccountContact section found in JSON');
+                return 'No AccountContact section';
+            }
+            List<Object> accContacts = (List<Object>) included.get('AccountContact');
+            System.debug('AccountContact count from JSON: ' + accContacts.size());
+            
+            // Existing contacts for the Account
+            Map<String, Contact> existingContacts = new Map<String, Contact>();
+            for (Contact c : [SELECT Id, Guidewire_ID__c, LastName FROM Contact WHERE AccountId = :accountId]) {
+                existingContacts.put(c.Guidewire_ID__c, c);
+            }
+            System.debug('Existing contacts found in Salesforce: ' + existingContacts.size());
+            
+            // Field mappings for Contact
+            Map<String, Guidewire_Salesforce_Field_Mapping__c> contactMapping = new Map<String, Guidewire_Salesforce_Field_Mapping__c>();
+            for (Guidewire_Salesforce_Field_Mapping__c m : [
+            SELECT GuidewireField__c, SalesforceField__c, SalesforceFieldType__c
+            FROM Guidewire_Salesforce_Field_Mapping__c
+            WHERE SalesforceObject__c = 'Contact'
+        ]) {
+                contactMapping.put(m.GuidewireField__c, m);
+            }
+            System.debug('Contact field mappings loaded: ' + contactMapping.size());
+            
+            // Field mappings for Account
+            Map<String, Guidewire_Salesforce_Field_Mapping__c> accountMapping = new Map<String, Guidewire_Salesforce_Field_Mapping__c>();
+            for (Guidewire_Salesforce_Field_Mapping__c m : [
+            SELECT GuidewireField__c, SalesforceField__c, SalesforceFieldType__c
+            FROM Guidewire_Salesforce_Field_Mapping__c
+            WHERE SalesforceObject__c = 'Account'
+        ]) {
+                accountMapping.put(m.GuidewireField__c, m);
+            }
+            System.debug('Account field mappings loaded: ' + accountMapping.size());
+            
+            // Prepare
+            Account accToUpdate = [SELECT Id FROM Account WHERE Id = :accountId LIMIT 1];
+            List<Contact> contactsToUpsert = new List<Contact>();
+            
+            System.debug('Account fields to update: ' + accToUpdate);
+            
+            // Loop over AccountContacts in JSON
+            for (Object obj : accContacts) {
+                Map<String, Object> accContact = (Map<String, Object>) obj;
+                System.debug('Processing AccountContact: ' + accContact);
+                Map<String, Object> attrs = (Map<String, Object>) accContact.get('attributes');
+                System.debug('AccountContact attributes: ' + attrs);
+                
+                // Extract roles properly (handles both list and single map)
+                String roleName;
+                Object rolesObj = attrs.get('accountContactRoles');
+                System.debug('AccountContact roles object: ' + rolesObj);
+                if (rolesObj != null) {
+                    if (rolesObj instanceof List<Object>) {
+                        List<Object> roleList = (List<Object>)rolesObj;
+                        if (!roleList.isEmpty()) {
+                            Map<String, Object> roleObj = (Map<String, Object>)roleList[0];
+                            roleName = (String)roleObj.get('name');
+                        }
+                    } else if (rolesObj instanceof Map<String, Object>) {
+                        Map<String, Object> roleObj = (Map<String, Object>)rolesObj;
+                        roleName = (String)roleObj.get('name');
+                    }
+                }
+                
+                
+                System.debug('Processing AccountContact with role: ' + roleName);
+                if (roleName  == 'AccountHolder') {
+                    System.debug('inside AccountHolder block');
+                    System.debug('Processing AccountHolder AccountContact, mapping fields to Account' +accountMapping.keySet());
+                    // Map AccountContact fields to Account
+                    for (String gwField : accountMapping.keySet()) {
+                        String path = gwField;
+                        if (path.toLowerCase().startsWith('included.accountcontact.attributes.')) {
+                            path = path.substring('included.accountcontact.attributes.'.length());
+                            System.debug(' Processing path: ' + path.toLowerCase());
+                        }
+                        Object val = getValueFromPath(attrs, path);
+                        //System.debug(' Mapped Value' + val);
+                        if (val != null) {
+                            accToUpdate.put(accountMapping.get(gwField).SalesforceField__c, val);
+                        }
+                    }
+                } else {
+                    // Handle non-AccountHolder AccountContact → Contact
+                    // Safely extract id value
+                    String gwId;
+                    Object idObj = attrs.get('id');
+                    System.debug('AccountContact id object: ' + idObj);
+                    if (idObj instanceof Map<String, Object>) {
+                        System.debug('Inside IF: AccountContact id map: ' + idObj);
+                        Map<String, Object> idMap = (Map<String, Object>) idObj;
+                        gwId = (String) idMap.get('id');
+                    } else if (idObj instanceof String) {
+                        System.debug('Inside ELSE: AccountContact id string: ' + idObj);
+                        gwId = (String) idObj;
+                    }
+                    
+                    System.debug('AccountContact Guidewire ID: ' + gwId);
+                    
+                    if (String.isBlank(gwId)) {
+                        System.debug('Skipping AccountContact because ID is missing or invalid: ' + attrs);
+                        continue;
+                    }
+                    
+                    Contact con = existingContacts.containsKey(gwId)
+                        ? existingContacts.get(gwId)
+                        : new Contact(AccountId = accountId, Guidewire_ID__c = gwId);
+                    
+                    System.debug('Processing Contact with Guidewire_ID__c: ' + gwId +' SF Contact :' + con);
+                    
+                    
+                    if (String.isBlank(con.LastName)) con.LastName = 'Unknown';
+                    
+                    System.debug('Mapping fields to Contact: ' + con);
+                    
+                    for (String gwField : contactMapping.keySet()) {
+                        
+                        if (gwField.toLowerCase().startsWith('included.accountcontact.attributes.officialids')) {
+                            System.debug('Skipping officialIds path: ' + gwField);
+                            continue;
+                        }
+                        //System.debug(' Original path: ' + path.toLowerCase());
+
+                        String path = gwField;
+                        if (path.toLowerCase().startsWith('included.accountcontact.attributes.')) {
+                            path = path.substring('included.accountcontact.attributes.'.length());
+                            //System.debug(' Processing path: ' + path.toLowerCase());
+                        }
+
+                        
+                        Object val = getValueFromPath(attrs, path);
+                        if (val != null) {
+                            // Handle nested object
+                            if (val instanceof Map<String, Object>) {
+                                Map<String, Object> valMap = (Map<String, Object>) val;
+                                if (valMap.containsKey('code')) {
+                                    val = valMap.get('code');
+                                } else if (valMap.containsKey('displayName')) {
+                                    val = valMap.get('displayName');
+                                } else {
+                                    // fallback: just serialize as string
+                                    val = JSON.serialize(valMap);
+                                }
+                            }
+                            con.put(contactMapping.get(gwField).SalesforceField__c, val);
+                        }
+                    }
+                    System.debug('Prepared Contact for upsert: ' + contactsToUpsert.size());
+                    contactsToUpsert.add(con);
+                }
+            }
+            
+            System.debug('Updating Account fields...');
+            update accToUpdate;
+            System.debug('Account updated: ' + accToUpdate.Id);
+            
+            if (!contactsToUpsert.isEmpty()) {
+                System.debug('Upserting contacts count: ' + contactsToUpsert.size());
+                upsert contactsToUpsert Guidewire_ID__c;
+                System.debug('Contacts upsert completed');
+            } else {
+                System.debug('No contacts to upsert');
+            }
+            
+            System.debug('=== syncAccountAndContacts END for AccountId: ' + accountId + ' ===');
+            return 'Account and related contacts updated successfully';
+            
+        } catch (DmlException dmlEx) {
+            System.debug('DML error in syncAccountAndContacts: ' + dmlEx.getMessage());
+            GuidewireUtilityClass.logIntegrationError(accountId, 500, 'DML error: ' + dmlEx.getMessage());
+            throw new AuraHandledException('Error updating Account or Contacts. Please check Integration Logs.');
+        } catch (Exception e) {
+            System.debug('General error in syncAccountAndContacts: ' + e.getMessage());
+            GuidewireUtilityClass.logIntegrationError(accountId, 500, 'General error: ' + e.getMessage() + ' | Stack: ' + e.getStackTraceString());
+            throw new AuraHandledException('Unexpected error during sync. Please check Integration Logs.');
+        }
+    }
+    
+    
+    
     public static List<Account> upsertAccountsFromJson(String jsonString) {
         List<Account> accountsToUpsert = new List<Account>();
         List<Account> upsertedAccounts = new List<Account>();
@@ -59,7 +270,7 @@ public with sharing class GuidewireAccountService {
                         if (path.startsWith('included.account.attributes.')) {
                             path = path.substring('included.account.attributes.'.length());
                         }
-                        System.debug(' Processing path: ' + path.toLowerCase());
+                        //   System.debug(' Processing path: ' + path.toLowerCase());
                         if (path.toLowerCase().startsWith('initialaccountholder.officialids')) {
                             System.debug('Skipping officialIds path: ' + path);
                             continue;
@@ -108,6 +319,7 @@ public with sharing class GuidewireAccountService {
                     
                     // Skip if Guidewire_ID__c missing
                     if (String.isNotBlank(accRecord.Guidewire_ID__c)) {
+                        System.debug(' Prepared Account record: ' + accRecord);
                         accountsToUpsert.add(accRecord);
                     }
                     
@@ -147,6 +359,7 @@ public with sharing class GuidewireAccountService {
         
         return upsertedAccounts;
     }
+    
     
     private static Object getValueFromPath(Map<String, Object> mapData, String path) {
         String[] parts = path.split('\\.');

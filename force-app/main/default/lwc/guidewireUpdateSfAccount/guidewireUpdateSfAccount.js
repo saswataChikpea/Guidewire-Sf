@@ -14,7 +14,7 @@ export default class GuidewireUpdateSfAccount extends LightningElement {
         console.log('Starting sync for dummy recordId 12345');
         
         
-        syncAccount({ recordIdOrDummy: 'pc:12345' })
+        syncAccount({ recordIdOrDummy: 'pc:100005' })
             .then(result => {
                 this.showToast('Success', result, 'success');
                  // refresh the record view data

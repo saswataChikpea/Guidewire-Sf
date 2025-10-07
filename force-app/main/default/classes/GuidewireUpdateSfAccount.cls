@@ -36,9 +36,9 @@ public with sharing class GuidewireUpdateSfAccount {
                 String gwJson = res.getBody();
                 
               //  System.debug('Received Guidewire response: ' + gwJson);
-                List<Account> upsertedAccounts = GuidewireAccountService.upsertAccountsFromJson(gwJson);
+                return GuidewireAccountService.syncAccountAndContacts(recordIdOrDummy, gwJson);
 
-                return ' Updated ' + upsertedAccounts.size() + ' account(s) successfully.';
+              //  return ' Updated ' + upsertedAccounts.size() + ' account(s) successfully.';
             } else {
                 // log error
                 GuidewireUtilityClass.logIntegrationError(
