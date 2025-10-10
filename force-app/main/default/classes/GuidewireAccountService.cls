@@ -14,21 +14,19 @@
 public with sharing class GuidewireAccountService {
     
     
+    
     @AuraEnabled
     public static String syncAccountAndContacts(String accountId, String gwJson) {
-        
-        
         try {
-            Account a = [SELECT Id,Name, Guidewire_ID__c FROM Account WHERE Guidewire_ID__c = 'pc:10001' limit 1];
+            Account a = [SELECT Id, Name, Guidewire_ID__c FROM Account WHERE Guidewire_ID__c = 'pc:10001' LIMIT 1];
             System.debug('Account found with Guidewire_ID__c: ' + accountId + ', Salesforce Id: ' + a.Id);
-            accountId = a.id;
+            accountId = a.Id;
         } catch (Exception e) {
             System.debug('No Account found with Guidewire_ID__c: ' + accountId);
         }
         
-        
-        
         System.debug('=== syncAccountAndContacts START for AccountId: ' + accountId + ' ===');
+        
         try {
             // 1. Upsert the Account as usual
             System.debug('Calling upsertAccountsFromJson...');
@@ -78,9 +76,11 @@ public with sharing class GuidewireAccountService {
             }
             System.debug('Account field mappings loaded: ' + accountMapping.size());
             
-            // Prepare
+            // Prepare lists
             Account accToUpdate = [SELECT Id FROM Account WHERE Id = :accountId LIMIT 1];
             List<Contact> contactsToUpsert = new List<Contact>();
+            List<Account> accountsToUpsert = new List<Account>(); // 🔹New for company subtypes
+            List<FinServ__AccountAccountRelation__c> accRelationsToInsert = new List<FinServ__AccountAccountRelation__c>(); // 🔹New
             
             System.debug('Account fields to update: ' + accToUpdate);
             
@@ -94,25 +94,22 @@ public with sharing class GuidewireAccountService {
                 // Extract roles properly (handles both list and single map)
                 String roleName;
                 Object rolesObj = attrs.get('accountContactRoles');
-                System.debug('AccountContact roles object: ' + rolesObj);
                 if (rolesObj != null) {
                     if (rolesObj instanceof List<Object>) {
-                        List<Object> roleList = (List<Object>)rolesObj;
+                        List<Object> roleList = (List<Object>) rolesObj;
                         if (!roleList.isEmpty()) {
-                            Map<String, Object> roleObj = (Map<String, Object>)roleList[0];
-                            roleName = (String)roleObj.get('name');
+                            Map<String, Object> roleObj = (Map<String, Object>) roleList[0];
+                            roleName = (String) roleObj.get('name');
                         }
                     } else if (rolesObj instanceof Map<String, Object>) {
-                        Map<String, Object> roleObj = (Map<String, Object>)rolesObj;
-                        roleName = (String)roleObj.get('name');
+                        Map<String, Object> roleObj = (Map<String, Object>) rolesObj;
+                        roleName = (String) roleObj.get('name');
                     }
                 }
                 
-                
                 System.debug('Processing AccountContact with role: ' + roleName);
-                if (roleName  == 'AccountHolder') {
-                    System.debug('inside AccountHolder block');
-                    System.debug('Processing AccountHolder AccountContact, mapping fields to Account' +accountMapping.keySet());
+                
+                if (roleName == 'AccountHolder') {
                     // Map AccountContact fields to Account
                     for (String gwField : accountMapping.keySet()) {
                         String path = gwField;
@@ -120,63 +117,16 @@ public with sharing class GuidewireAccountService {
                             path = path.substring('included.accountcontact.attributes.'.length());
                             System.debug(' Processing path: ' + path.toLowerCase());
                         }
-                        Object val = getValueFromPath(attrs, path);
-                        //System.debug(' Mapped Value' + val);
-                        if (val != null) {
-                            accToUpdate.put(accountMapping.get(gwField).SalesforceField__c, val);
-                        }
-                    }
-                } else {
-                    // Handle non-AccountHolder AccountContact → Contact
-                    // Safely extract id value
-                    String gwId;
-                    Object idObj = attrs.get('id');
-                    System.debug('AccountContact id object: ' + idObj);
-                    if (idObj instanceof Map<String, Object>) {
-                        System.debug('Inside IF: AccountContact id map: ' + idObj);
-                        Map<String, Object> idMap = (Map<String, Object>) idObj;
-                        gwId = (String) idMap.get('id');
-                    } else if (idObj instanceof String) {
-                        System.debug('Inside ELSE: AccountContact id string: ' + idObj);
-                        gwId = (String) idObj;
-                    }
-                    
-                    System.debug('AccountContact Guidewire ID: ' + gwId);
-                    
-                    if (String.isBlank(gwId)) {
-                        System.debug('Skipping AccountContact because ID is missing or invalid: ' + attrs);
-                        continue;
-                    }
-                    
-                    Contact con = existingContacts.containsKey(gwId)
-                        ? existingContacts.get(gwId)
-                        : new Contact(AccountId = accountId, Guidewire_ID__c = gwId);
-                    
-                    System.debug('Processing Contact with Guidewire_ID__c: ' + gwId +' SF Contact :' + con);
-                    
-                    
-                    if (String.isBlank(con.LastName)) con.LastName = 'Unknown';
-                    
-                    System.debug('Mapping fields to Contact: ' + con);
-                    
-                    for (String gwField : contactMapping.keySet()) {
                         
-                        if (gwField.toLowerCase().startsWith('included.accountcontact.attributes.officialids')) {
-                            System.debug('Skipping officialIds path: ' + gwField);
+                        // Skip officialIDs
+                        if (path.toLowerCase().contains('officialids')) {
+                            System.debug('Skipping officialIDs field for Account');
                             continue;
                         }
-                        //System.debug(' Original path: ' + path.toLowerCase());
-
-                        String path = gwField;
-                        if (path.toLowerCase().startsWith('included.accountcontact.attributes.')) {
-                            path = path.substring('included.accountcontact.attributes.'.length());
-                            //System.debug(' Processing path: ' + path.toLowerCase());
-                        }
-
                         
                         Object val = getValueFromPath(attrs, path);
+                        //System.debug(' Mapped Value: ' + val);
                         if (val != null) {
-                            // Handle nested object
                             if (val instanceof Map<String, Object>) {
                                 Map<String, Object> valMap = (Map<String, Object>) val;
                                 if (valMap.containsKey('code')) {
@@ -188,24 +138,190 @@ public with sharing class GuidewireAccountService {
                                     val = JSON.serialize(valMap);
                                 }
                             }
-                            con.put(contactMapping.get(gwField).SalesforceField__c, val);
+                            accToUpdate.put(accountMapping.get(gwField).SalesforceField__c, val);
+                            
+                        }
+                        continue;
+                    }
+                } else {
+                    // Handle non-AccountHolder AccountContact → Contact or Company
+                    String gwId;
+                    Object idObj = attrs.get('id');
+                    System.debug('AccountContact id object: ' + idObj);
+                    if (idObj instanceof Map<String, Object>) {
+                        Map<String, Object> idMap = (Map<String, Object>) idObj;
+                        gwId = (String) idMap.get('id');
+                    } else if (idObj instanceof String) {
+                        gwId = (String) idObj;
+                    }
+                    
+                    if (String.isBlank(gwId)) {
+                        System.debug('Skipping AccountContact because ID is missing or invalid: ' + attrs);
+                        continue;
+                    }
+                    
+                    String contactSubtype = (String) attrs.get('contactSubtype');
+                    System.debug('AccountContact subtype: ' + contactSubtype);
+                    
+                    if (contactSubtype == 'Company') {
+                        System.debug('Processing Company subtype: ' + contactSubtype);
+                        Account relatedAcc;
+                        
+                        List<Account> existingCompanyList = [
+                                SELECT Id, Name, Guidewire_ID__c
+                                FROM Account
+                                WHERE Guidewire_ID__c = :gwId
+                                LIMIT 1
+                            ];
+                        
+                        System.debug('Existing related company accounts found: ' + existingCompanyList.size());
+                        if (!existingCompanyList.isEmpty()) {
+                            relatedAcc = existingCompanyList[0];
+                            System.debug('Found existing related company Account: ' + relatedAcc.Name);
+                        } else {
+                            relatedAcc = new Account(
+                                Name = (String) attrs.get('displayName'),
+                            Guidewire_ID__c = gwId
+                                );
+                            System.debug('Prepared new related company Account for upsert: ' + relatedAcc.Name);
+                        }
+                        
+                        //  Always run field mapping regardless of insert/update
+                        for (String gwField : contactMapping.keySet()) {
+                            String path = gwField;
+                            if (path.toLowerCase().startsWith('included.accountcontact.attributes.')) {
+                                path = path.substring('included.accountcontact.attributes.'.length());
+                            }
+                            
+                            if (path.toLowerCase().contains('officialids')) continue;
+                            
+                            Object val = getValueFromPath(attrs, path);
+                            if (val != null) {
+                                if (val instanceof Map<String, Object>) {
+                                    Map<String, Object> valMap = (Map<String, Object>) val;
+                                    if (valMap.containsKey('code')) val = valMap.get('code');
+                                    else if (valMap.containsKey('displayName')) val = valMap.get('displayName');
+                                    else val = JSON.serialize(valMap);
+                                }
+                                
+                                String sfField = contactMapping.get(gwField).SalesforceField__c;
+                                if (Schema.SObjectType.Account.fields.getMap().containsKey(sfField)) {
+                                    relatedAcc.put(sfField, val);
+                                   // System.debug('Mapped Company field ' + sfField + ' = ' + val);
+                                }
+                            }
+                        }
+                        
+                        //  Ensure Guidewire_ID__c & Name are always populated
+                        relatedAcc.Guidewire_ID__c = gwId;
+                        if (String.isBlank(relatedAcc.Name)) {
+                            relatedAcc.Name = (String) attrs.get('displayName');
+                        }
+                        
+                        // Add to the upsert list (existing or new)
+                        //accountsToUpsert.add(relatedAcc);
+                        System.debug('Prepared related company Account for upsert: ' + relatedAcc);
+                        
+                        //  No inline upsert here — will be handled once after loop
+                        
+                        // Create Reciprocal Role
+                        FinServ__ReciprocalRole__c recRole = new FinServ__ReciprocalRole__c(
+                            Name = roleName,
+                        FinServ__InverseRole__c = 'Test',
+                        RecordTypeId = Schema.SObjectType.FinServ__ReciprocalRole__c.getRecordTypeInfosByDeveloperName().get('AccountRole').getRecordTypeId()
+                            );
+                        insert recRole;
+                        
+                        // Check if a relation already exists for this related account (based on Guidewire_ID__c on related Account)
+                        List<FinServ__AccountAccountRelation__c> existingRelations = [
+                            SELECT Id, FinServ__Account__c, FinServ__RelatedAccount__c,FinServ__RelatedAccount__r.Name, FinServ__RelatedAccount__r.Guidewire_ID__c
+                            FROM FinServ__AccountAccountRelation__c
+                            WHERE FinServ__Account__c = :accountId
+                            AND FinServ__RelatedAccount__r.Guidewire_ID__c = :relatedAcc.Guidewire_ID__c
+                            LIMIT 1
+                        ];
+                        
+                        if (existingRelations.isEmpty()) {
+                            System.debug('No existing relation found for related Account with Guidewire_ID__c: ' + relatedAcc.Guidewire_ID__c);
+                            
+                            // Create new relation
+                            FinServ__AccountAccountRelation__c accRelation = new FinServ__AccountAccountRelation__c(
+                                FinServ__Account__c = accountId,
+                                FinServ__RelatedAccount__c = relatedAcc.Id,
+                                FinServ__Role__c = recRole.Id
+                                );
+                            accRelationsToInsert.add(accRelation);
+                            System.debug('Prepared new AccountAccountRelation for Company: ' + accRelation);
+                        } else {
+                            System.debug('Existing AccountAccountRelation found: ' + existingRelations[0].FinServ__RelatedAccount__r.Name + ', updating related Account fields instead');
+                            
+                            // Update the existing related Account record (relatedAcc already has mapped fields)
+                            accountsToUpsert.add(relatedAcc);
                         }
                     }
-                    System.debug('Prepared Contact for upsert: ' + contactsToUpsert.size());
-                    contactsToUpsert.add(con);
+                    else if (contactSubtype == 'Person' || String.isBlank(contactSubtype)) {
+                        Contact con = existingContacts.containsKey(gwId)
+                            ? existingContacts.get(gwId)
+                            : new Contact(AccountId = accountId, Guidewire_ID__c = gwId);
+                        
+                        System.debug('Processing Contact with Guidewire_ID__c: ' + gwId + ' SF Contact :' + con);
+                        
+                        if (String.isBlank(con.LastName)) con.LastName = 'Unknown';
+                        
+                        for (String gwField : contactMapping.keySet()) {
+                            // System.debug('Processing '+gwField);
+                            String path = gwField;
+                            if (path.toLowerCase().startsWith('included.accountcontact.attributes.')) {
+                                path = path.substring('included.accountcontact.attributes.'.length());
+                            }
+                            
+                            if (path.toLowerCase().contains('officialids')) {
+                                System.debug('Skipping officialIDs field');
+                                continue;
+                            }
+                            
+                            Object val = getValueFromPath(attrs, path);
+                            if (val != null) {
+                                if (val instanceof Map<String, Object>) {
+                                    Map<String, Object> valMap = (Map<String, Object>) val;
+                                    if (valMap.containsKey('code')) {
+                                        val = valMap.get('code');
+                                    } else if (valMap.containsKey('displayName')) {
+                                        val = valMap.get('displayName');
+                                    } else {
+                                        // fallback: just serialize as string
+                                        val = JSON.serialize(valMap);
+                                    }
+                                }
+                                con.put(contactMapping.get(gwField).SalesforceField__c, val);
+                            }
+                        }
+                        contactsToUpsert.add(con);
+                    }
                 }
+            }
+            
+            if (!accountsToUpsert.isEmpty()) {
+                upsert accountsToUpsert Guidewire_ID__c;
+                System.debug('Upserted related company accounts: ' + accountsToUpsert.size());
             }
             
             System.debug('Updating Account fields...');
             update accToUpdate;
             System.debug('Account updated: ' + accToUpdate.Id);
             
+            
+            
             if (!contactsToUpsert.isEmpty()) {
                 System.debug('Upserting contacts count: ' + contactsToUpsert.size());
                 upsert contactsToUpsert Guidewire_ID__c;
-                System.debug('Contacts upsert completed');
             } else {
                 System.debug('No contacts to upsert');
+            }
+            
+            if (!accRelationsToInsert.isEmpty()) {
+                System.debug('Inserting account relations count: ' + accRelationsToInsert.size());
+                insert accRelationsToInsert;
             }
             
             System.debug('=== syncAccountAndContacts END for AccountId: ' + accountId + ' ===');
@@ -221,6 +337,8 @@ public with sharing class GuidewireAccountService {
             throw new AuraHandledException('Unexpected error during sync. Please check Integration Logs.');
         }
     }
+    
+    
     
     
     
