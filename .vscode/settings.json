@@ -23,5 +23,6 @@
     "titleBar.inactiveBackground": "#8fa62899",
     "titleBar.inactiveForeground": "#15202b99"
   },
-  "peacock.color": "#8fa628"
+  "peacock.color": "#8fa628",
+  "xml.preferences.showSchemaDocumentationType": "none"
 }
